@@ -1,0 +1,33 @@
+{
+  "name": "bright-cloud-studio/contao-osi-test-import",
+  "description": "Contao backend module to import forms and fields from CSV (append-only).",
+  "type": "contao-bundle",
+  "license": "proprietary",
+  "authors": [
+    {
+      "name": "Bright Cloud Studio",
+      "homepage": "https://brightcloudstudio.com"
+    }
+  ],
+  "require": {
+    "php": ">=8.1",
+    "contao/core-bundle": "^5.3"
+  },
+  "autoload": {
+    "psr-4": {
+      "Bcs\\OsiTestImport\\": "src/"
+    },
+    "classmap": [
+      "src/Resources/contao"
+    ],
+    "exclude-from-classmap": [
+      "src/Resources/contao/config/",
+      "src/Resources/contao/dca/",
+      "src/Resources/contao/languages/",
+      "src/Resources/contao/templates/"
+    ]
+  },
+  "extra": {
+    "contao-manager-plugin": "Bcs\\OsiTestImport\\ContaoManager\\Plugin"
+  }
+}
