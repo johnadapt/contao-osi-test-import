@@ -1,6 +1,6 @@
 {
   "name": "bright-cloud-studio/contao-osi-test-import",
-  "description": "Contao backend module to import forms and fields from CSV (append-only).",
+  "description": "Contao backend module to import test forms and multiple-choice questions from CSV (append-only).",
   "type": "contao-bundle",
   "license": "proprietary",
   "authors": [

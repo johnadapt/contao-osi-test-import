@@ -1,0 +1,36 @@
+<div class="tl_listing_container">
+    <h2>CSV Import Results</h2>
+
+    <div class="import-summary">
+        <?= $this->summary ?>
+    </div>
+
+    <?php if (!empty($this->formsList)): ?>
+        <h3>Forms Created</h3>
+        <ul style="list-style-type: none;">
+        <?php foreach ($this->formsList as $form): ?>
+            <li>
+                <h4 style="margin-bottom: 10px; text-decoration: underline;"><a href="contao?do=form&act=edit&id=<?= $form['id'] ?>">
+                    <?= $form['title'] ?> (ID <?= $form['id'] ?>)
+                </a></h4>
+            </li>
+        <?php endforeach; ?>
+        </ul>
+    <?php endif; ?>
+   <?php if (!empty($this->failures)): ?>
+        <h3 style="color:red;">Failures</h3>
+        <ul>
+        <?php foreach ($this->failures as $fail): ?>
+            <li><?= $fail ?></li>
+        <?php endforeach; ?>
+        </ul>
+    <?php endif; ?>
+    <p style="cursor:pointer; margin-block:30px; margin-left:30px;" onclick="var el=document.getElementById('import-details'); el.style.display=(el.style.display==='none'?'block':'none');">
+        Show/Hide Import Log
+    </p>
+    <div id="import-details" style="display:none; margin:-25px 45px 30px;">
+        <?= $this->details ?>
+    </div>
+
+    <p><a href="<?= $this->backUrl ?>" class="tl_submit">Back to Import</a></p>
+</div>

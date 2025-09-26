@@ -8,6 +8,9 @@ use Contao\Message;
 use Contao\System;
 use Contao\File;
 use Contao\Database;
+use Contao\FilesModel;
+use Contao\Folder;
+use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
 
 class CsvFormImport extends BackendModule
 {
@@ -15,187 +18,366 @@ class CsvFormImport extends BackendModule
 
     protected function compile(): void
     {
-        $this->Template->content = '';
+        $request = System::getContainer()->get('request_stack')->getCurrentRequest();
+        $session = $request->getSession();
 
+        /** @var CsrfTokenManagerInterface $tokenManager */
         $tokenManager = System::getContainer()->get('contao.csrf.token_manager');
         $tokenValue = $tokenManager->getDefaultTokenValue();
+        $this->Template->tokenValue = $tokenValue;
 
+        //
+        // Ensure example CSV exists in /files/test_csv_importer and is marked public
+        //
+        $folderPath = 'files/test_csv_importer';
+        $exampleCsvPath = $folderPath . '/example_forms.csv';
+        $projectDir = System::getContainer()->getParameter('kernel.project_dir');
+        $absoluteExample = $projectDir . '/' . $exampleCsvPath;
+
+        // Create folder if missing (and mark public)
+        $folder = new Folder($folderPath);
+        $model  = FilesModel::findByPath($folderPath);
+        if ($model !== null && !$model->public) {
+            $model->public = 1;
+            $model->save();
+        }
+
+        // Create example_forms.csv if it does not exist
+        if (!file_exists($absoluteExample)) {
+            $exampleContent = "form_title,embed_code,percentage,question,option_1,option_2,option_3,option_4,option_5,option_6,option_7,option_8,option_9,option_10,correct_option\n"
+                . "AAA-Safety Quiz,\"<div>Example embed code or iframe</div>\",90,When handling chemicals,Use gloves,Wear goggles,Ignore safety,Wash hands,,,,,,,2\n";
+            file_put_contents($absoluteExample, $exampleContent);
+            FilesModel::syncFiles();
+        }
+
+        //
+        // Steps
+        //
+        $step = Input::post('IMPORT_STEP') ?: Input::get('step');
+
+        // === Result page ===
+        if ($step === 'result' && $session->has('bcs_csv_form_import_results')) {
+            $this->strTemplate = 'be_csv_form_import_result';
+            $this->Template    = new \Contao\BackendTemplate($this->strTemplate);
+
+            $results = $session->get('bcs_csv_form_import_results');
+            $this->Template->summary   = $results['summary'];
+            $this->Template->details   = $results['details'];
+            $this->Template->formsList = $results['formsList'];
+            $this->Template->failures  = $results['failures'];
+            $this->Template->backUrl   = $this->addToUrl('', true, ['step']);
+            $session->remove('bcs_csv_form_import_results');
+            return;
+        }
+
+        // === Preview page ===
+        if ($step === 'preview' && $session->has('bcs_csv_form_import_preview')) {
+            $this->strTemplate        = 'be_csv_form_import_preview';
+            $this->Template           = new \Contao\BackendTemplate($this->strTemplate);
+            $this->Template->tokenValue = $tokenValue;
+            $this->Template->forms      = $session->get('bcs_csv_form_import_preview');
+
+            if (Input::post('FORM_SUBMIT') === 'tl_csv_form_import_confirm') {
+                $results = $this->doImport($this->Template->forms);
+                $session->remove('bcs_csv_form_import_preview');
+                $session->set('bcs_csv_form_import_results', $results);
+
+                $uri = $request->getUri();
+                $sep = (strpos($uri, '?') === false) ? '?' : '&';
+                header('Location: ' . $uri . $sep . 'step=result');
+                exit;
+            }
+            return;
+        }
+
+        // === Upload page ===
         if (Input::post('FORM_SUBMIT') === 'tl_csv_form_import') {
-            $file = $_FILES['csv_file'] ?? null;
-            $delimiterSel = Input::post('delimiter');
-            $delimiter = ($delimiterSel === 'semicolon') ? ';' : (($delimiterSel === 'tab') ? "\t" : ',');
+            $file      = $_FILES['csv_file'] ?? null;
+            $delimiter = ','; // always comma
 
             if (!$file || !$file['tmp_name']) {
                 Message::addError('Please choose a CSV file.');
-            } else {
-                $csv = new File($file['tmp_name']);
-                $rows = [];
+                return;
+            }
 
-                if (($handle = fopen($csv->path, 'r')) !== false) {
-                    while (($data = fgetcsv($handle, 10000, $delimiter)) !== false) {
-                        $rows[] = array_map(fn($v) => is_string($v) ? trim($v) : $v, $data);
-                    }
-                    fclose($handle);
+            $csv  = new File($file['tmp_name']);
+            $rows = [];
+            if (($handle = fopen($csv->path, 'r')) !== false) {
+                while (($data = fgetcsv($handle, 10000, $delimiter)) !== false) {
+                    $rows[] = $data;
                 }
+                fclose($handle);
+            }
 
-                if (count($rows) < 2) {
-                    Message::addError('CSV has no data rows.');
-                } else {
-                    $headers = array_map('trim', $rows[0]);
-                    $dataRows = array_slice($rows, 1);
-                    $required = ['form_alias','field_type','field_name','label'];
-                    $missing = array_diff($required, $headers);
-                    if ($missing) {
-                        Message::addError('Missing required columns: ' . implode(', ', $missing));
-                    } else {
-                        $db = Database::getInstance();
-                        $index = array_flip($headers);
-                        $allowedTypes = ['checkbox','radio','select','submit'];
-                        $createdForms = [];
-                        $createdFields = [];
-                        $skippedExists = [];
-                        $skippedInvalid = [];
-                        $formIdCache = [];
+            if (count($rows) < 2) {
+                Message::addError('CSV has no data rows.');
+                return;
+            }
 
-                        foreach ($dataRows as $rowIdx => $row) {
-                            if (count($row) != count($headers)) {
-                                $skippedInvalid[] = ['row' => $rowIdx+2, 'reason' => 'Column count mismatch'];
-                                continue;
-                            }
-                            $r = array_combine($headers, $row);
-                            $formAlias = (string)($r['form_alias'] ?? '');
-                            $fieldType = strtolower((string)($r['field_type'] ?? ''));
-                            $fieldName = (string)($r['field_name'] ?? '');
-                            $label     = (string)($r['label'] ?? '');
+            // Normalize headers to lowercase (so "Question" works)
+            $rawHeaders = $rows[0];
+            $headers    = array_map(function ($h) {
+                return strtolower(trim($h));
+            }, $rawHeaders);
 
-                            if ($formAlias === '' || $fieldType === '' || $fieldName === '' || $label === '') {
-                                $skippedInvalid[] = ['row' => $rowIdx+2, 'reason' => 'Missing required value'];
-                                continue;
-                            }
-                            if (!in_array($fieldType, $allowedTypes, true)) {
-                                $skippedInvalid[] = ['row' => $rowIdx+2, 'reason' => 'Unsupported field_type: ' . $fieldType];
-                                continue;
-                            }
-                            $optionsStr = (string)($r['options'] ?? '');
-                            if (in_array($fieldType, ['checkbox','radio','select'], true) && $optionsStr === '') {
-                                $skippedInvalid[] = ['row' => $rowIdx+2, 'reason' => 'Missing options'];
-                                continue;
-                            }
-
-                            $formId = $formIdCache[$formAlias] ?? 0;
-                            if (!$formId) {
-                                $objForm = $db->prepare("SELECT id FROM tl_form WHERE alias=?")->execute($formAlias);
-                                if ($objForm->numRows > 0) {
-                                    $formId = (int) $objForm->id;
-                                } else {
-                                    $title = (string)($r['form_title'] ?? $formAlias);
-                                    $submitLabel = (string)($r['submit_label'] ?? 'Submit');
-                                    $db->prepare("INSERT INTO tl_form (tstamp, title, alias, method, submit) VALUES (?, ?, ?, ?, ?)")
-                                        ->execute(time(), $title, $formAlias, 'POST', $submitLabel);
-                                    $formId = (int) $db->insertId;
-                                    $createdForms[] = ['id' => $formId, 'alias' => $formAlias];
-                                }
-                                $formIdCache[$formAlias] = $formId;
-                            }
-
-                            $objField = $db->prepare("SELECT id FROM tl_form_field WHERE pid=? AND name=?")->execute($formId, $fieldName);
-                            if ($objField->numRows > 0) {
-                                $skippedExists[] = ['row' => $rowIdx+2, 'name' => $fieldName, 'reason' => 'Field exists'];
-                                continue;
-                            }
-
-                            $insert = [
-                                'tstamp'   => time(),
-                                'pid'      => $formId,
-                                'type'     => $fieldType,
-                                'name'     => $fieldName,
-                                'label'    => $label,
-                                'class'    => (string)($r['css_class'] ?? ''),
-                                'mandatory'=> (int)($r['mandatory'] ?? 0),
-                            ];
-                            $objMax = $db->prepare("SELECT MAX(sorting) AS maxs FROM tl_form_field WHERE pid=?")->execute($formId);
-                            $nextSort = (int)$objMax->maxs + 128;
-                            if ($nextSort < 128) $nextSort = 128;
-                            $insert['sorting'] = $nextSort;
-
-                            if (in_array($fieldType, ['checkbox','radio','select'], true)) {
-                                $insert['optionsType'] = 'manual';
-                                $insert['options'] = serialize(self::parseOptions($optionsStr));
-                                $multiple = (int)($r['multiple'] ?? 0);
-                                $size = (int)($r['size'] ?? 0);
-                                if ($fieldType === 'radio') $multiple = 0;
-                                $insert['multiple'] = $multiple;
-                                if ($size > 0) $insert['size'] = $size;
-                            } elseif ($fieldType === 'submit') {
-                                $insert['slabel'] = $label;
-                            }
-
-                            $db->prepare("INSERT INTO tl_form_field %s")->set($insert)->execute();
-                            $createdFields[] = ['row' => $rowIdx+2, 'name' => $fieldName, 'type' => $fieldType];
-                        }
-
-                        $this->Template->content .= '<h3>Import Results</h3><ul>';
-                        $this->Template->content .= '<li>Forms created: ' . count($createdForms) . '</li>';
-                        $this->Template->content .= '<li>Fields created: ' . count($createdFields) . '</li>';
-                        $this->Template->content .= '<li>Rows skipped (exists): ' . count($skippedExists) . '</li>';
-                        $this->Template->content .= '<li>Rows skipped (invalid): ' . count($skippedInvalid) . '</li>';
-                        $this->Template->content .= '</ul>';
-                    }
+            // Only these headers are required now
+            $requiredHeaders = ['form_title', 'question', 'option_1', 'correct_option'];
+            foreach ($requiredHeaders as $req) {
+                if (!in_array($req, $headers, true)) {
+                    Message::addError('Missing required column header: ' . $req);
+                    return;
                 }
             }
-        }
 
-        $action = System::getContainer()->get('request_stack')->getCurrentRequest()->getUri();
-        $this->Template->content .= '
-        <form action="' . $action . '" method="post" enctype="multipart/form-data">
-            <input type="hidden" name="FORM_SUBMIT" value="tl_csv_form_import">
-            <input type="hidden" name="REQUEST_TOKEN" value="' . $tokenValue . '">
-            <div class="tl_tbox">
-                <label for="csv_file">CSV file</label><br>
-                <input type="file" name="csv_file" id="csv_file" accept=".csv">
-            </div>
-            <div class="tl_tbox">
-                <label for="delimiter">Delimiter</label><br>
-                <select name="delimiter" id="delimiter">
-                    <option value="comma">Comma (,)</option>
-                    <option value="semicolon">Semicolon (;)</option>
-                    <option value="tab">Tab (TAB)</option>
-                </select>
-            </div>
-            <div class="tl_formbody_submit">
-                <button type="submit" class="tl_submit">Import CSV</button>
-            </div>
-        </form>';
+            $dataRows = array_slice($rows, 1);
+            $forms    = [];
+
+            foreach ($dataRows as $rowIndex => $row) {
+                $issues = [];
+
+                // Row length issues
+                if (count($row) !== count($headers)) {
+                    $issues[] = 'Column count mismatch (expected ' . count($headers) . ', got ' . count($row) . ')';
+                }
+
+                // Build rowData by headers (pad with empty strings if short)
+                $rowData = [];
+                foreach ($headers as $i => $col) {
+                    $rowData[$col] = $row[$i] ?? '';
+                }
+
+                // Map "question" -> "label" (DB uses label)
+                if (isset($rowData['question'])) {
+                    $rowData['label'] = $rowData['question'];
+                }
+
+                // Validate required fields per-row
+                foreach ($requiredHeaders as $req) {
+                    if ($req === 'correct_option') {
+                        if ($rowData['correct_option'] === '' || !ctype_digit((string)$rowData['correct_option'])) {
+                            $issues[] = 'Missing or invalid required field: correct_option (must be a number)';
+                        } else {
+                            $c = (int) $rowData['correct_option'];
+                            if ($c < 1 || $c > 10) {
+                                $issues[] = 'Invalid correct_option: must be between 1 and 10';
+                            }
+                        }
+                        continue;
+                    }
+                    if ($rowData[$req] === '') {
+                        $issues[] = 'Missing required field: ' . $req;
+                    }
+                }
+
+                // Extra validation: if correct_option points to empty option
+                if ($rowData['correct_option'] !== '' && ctype_digit((string)$rowData['correct_option'])) {
+                    $c = (int) $rowData['correct_option'];
+                    $optKey = 'option_' . $c;
+                    if (empty($rowData[$optKey])) {
+                        $issues[] = 'Correct option points to empty ' . $optKey;
+                    }
+                }
+
+                $rowData['_issues'] = $issues;
+
+                $formTitle = trim((string)($rowData['form_title'] ?? ''));
+                if (!isset($forms[$formTitle])) {
+                    $forms[$formTitle] = [
+                        'title'      => $formTitle,
+                        'embed_code' => $rowData['embed_code'] ?? '',
+                        'percentage' => $rowData['percentage'] ?? '',
+                        'questions'  => [],
+                    ];
+                }
+
+                $forms[$formTitle]['questions'][] = $rowData;
+            }
+
+            $session->set('bcs_csv_form_import_preview', $forms);
+            $uri = $request->getUri();
+            $sep = (strpos($uri, '?') === false) ? '?' : '&';
+            header('Location: ' . $uri . $sep . 'step=preview');
+            exit;
+        }
     }
 
-    protected static function parseOptions(string $input): array
+    protected function doImport(array $forms): array
     {
-        $input = trim($input);
-        if ($input === '') return [];
-        if ($input[0] === '[') {
-            $decoded = json_decode($input, true);
-            if (is_array($decoded)) {
-                $out = [];
-                foreach ($decoded as $item) {
-                    if (isset($item['value']) && isset($item['label'])) {
-                        $out[] = [
-                            'value' => (string)$item['value'],
-                            'label' => (string)$item['label'],
-                            'default' => ''
-                        ];
+        $db            = Database::getInstance();
+        $createdForms  = 0;
+        $createdFields = 0;
+        $formMap       = [];
+        $log           = [];
+        $failures      = [];
+
+        // Pass 1: Forms
+        $log[] = 'Starting Pass 1: Creating forms…';
+
+        foreach ($forms as $form) {
+            $slugService = System::getContainer()->get('contao.slug');
+            $slug        = $slugService->generate($form['title'], []);
+            $percentage  = ($form['percentage'] !== '' ? (int) $form['percentage'] : 90);
+            $tempFormId  = 'tmp_' . time();
+
+            try {
+                $db->prepare("INSERT INTO tl_form
+                    (tstamp, title, alias, method, attributes, formID)
+                    VALUES (?, ?, ?, ?, ?, ?)")
+                   ->execute(
+                       time(),
+                       $form['title'],
+                       $slug,
+                       'POST',
+                       serialize([]),
+                       $tempFormId
+                   );
+            } catch (\Exception $e) {
+                $msg = 'Form insert SQL error for ' . $form['title'] . ': ' . $e->getMessage();
+                $log[] = $msg; $failures[] = $msg;
+                continue;
+            }
+
+            $formId = $db->insertId;
+            if (!$formId) {
+                $stmt = $db->prepare("SELECT id FROM tl_form WHERE alias=? ORDER BY id DESC")
+                           ->limit(1)
+                           ->execute($slug);
+                if ($stmt->numRows) {
+                    $formId = $stmt->id;
+                }
+            }
+
+            if (!$formId) {
+                $msg = 'Form insert failed for: ' . $form['title'];
+                $log[] = $msg; $failures[] = $msg;
+                continue;
+            }
+
+            try {
+                $db->prepare("UPDATE tl_form
+                    SET formID=?, formType=?, scoringType=?, embed_code=?, percentage=?, publish=?
+                    WHERE id=?")
+                   ->execute(
+                       'cert_test_' . $formId,
+                       'test',
+                       'percentage_correct',
+                       $form['embed_code'],
+                       $percentage,
+                       1,
+                       $formId
+                   );
+            } catch (\Exception $e) {
+                $msg = 'Form update SQL error for ' . $form['title'] . ': ' . $e->getMessage();
+                $log[] = $msg; $failures[] = $msg;
+                continue;
+            }
+
+            $formMap[$form['title']] = $formId;
+            $createdForms++;
+            $log[] = 'Form created: ' . $form['title'] . ' (ID ' . $formId . ')';
+        }
+
+        $log[] = 'Pass 1 complete: ' . $createdForms . ' forms created.';
+        $log[] = 'Starting Pass 2: Creating form fields…';
+
+        // Pass 2: Fields
+        foreach ($forms as $form) {
+            if (empty($formMap[$form['title']])) {
+                continue;
+            }
+
+            $formId         = $formMap[$form['title']];
+            $sorting        = 64;
+            $formFieldCount = 0;
+
+            foreach ($form['questions'] as $question) {
+                // Skip invalid rows (show why in results)
+                if (!empty($question['_issues'])) {
+                    $failures[] = 'Skipped invalid row in form ' . $form['title'] . ': ' . implode('; ', $question['_issues']);
+                    continue;
+                }
+
+                // Build options array (value/label + correct mark)
+                $options = [];
+                for ($i = 1; $i <= 10; $i++) {
+                    $key = 'option_' . $i;
+                    $opt = $question[$key] ?? '';
+                    if ($opt !== '') {
+                        $optArr = ['value' => (string) $i, 'label' => $opt];
+                        if ((string)$i === (string)($question['correct_option'] ?? '')) {
+                            $optArr['correct'] = '1';
+                        }
+                        $options[] = $optArr;
                     }
                 }
-                return $out;
+
+                try {
+                    $db->prepare("INSERT INTO tl_form_field
+                        (tstamp, pid, sorting, type, mandatory, label, name, options)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                       ->execute(
+                           time(),
+                           $formId,
+                           $sorting,
+                           'multiple_choice_question',
+                           1,
+                           $question['label'],   // mapped from "question"
+                           '',
+                           serialize($options)
+                       );
+
+                    $fieldId = $db->insertId;
+                    if ($fieldId) {
+                        $db->prepare("UPDATE tl_form_field SET name=? WHERE id=?")
+                           ->execute('question_date_' . $fieldId, $fieldId);
+                    }
+                } catch (\Exception $e) {
+                    $msg = 'Field insert error in form ' . $form['title'] . ': ' . $e->getMessage();
+                    $log[] = $msg; $failures[] = $msg;
+                    continue;
+                }
+
+                $createdFields++;
+                $formFieldCount++;
+                $sorting += 64;
             }
+
+            // Submit button (always last)
+            $sorting += 64;
+            try {
+                $db->prepare("INSERT INTO tl_form_field
+                    (tstamp, pid, sorting, type, mandatory, class, slabel)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)")
+                   ->execute(
+                       time(),
+                       $formId,
+                       $sorting,
+                       'submit',
+                       0,
+                       'button btn',
+                       'Submit Answers'
+                   );
+                $formFieldCount++;
+            } catch (\Exception $e) {
+                $msg = 'Submit button insert error in form ' . $form['title'] . ': ' . $e->getMessage();
+                $log[] = $msg; $failures[] = $msg;
+            }
+
+            $log[] = 'Fields created for ' . $form['title'] . ': ' . $formFieldCount;
         }
-        $parts = explode('|', $input);
-        $out = [];
-        foreach ($parts as $p) {
-            $bits = explode(':', $p, 2);
-            $value = trim($bits[0]);
-            $label = trim($bits[1] ?? $bits[0]);
-            $out[] = ['value' => $value, 'label' => $label, 'default' => ''];
+
+        $log[] = 'Pass 2 complete: ' . $createdFields . ' total question fields created.';
+
+        $formList = [];
+        foreach ($formMap as $title => $id) {
+            $formList[] = ['title' => $title, 'id' => $id];
         }
-        return $out;
+
+        return [
+            'summary'   => '<ul><li>Forms created: ' . $createdForms . '</li><li>Questions created: ' . $createdFields . '</li></ul>',
+            'details'   => '<div class="import-log">' . implode('<br>', $log) . '</div>',
+            'failures'  => $failures,
+            'formsList' => $formList,
+        ];
     }
 }

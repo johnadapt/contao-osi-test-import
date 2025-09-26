@@ -1,9 +1,27 @@
-<?php
-/** @var string $content */
-?>
 <div class="tl_listing_container">
-  <div class="tl_header"><h2>CSV Form Importer</h2></div>
-  <div class="tl_content">
-    <?= $this->content ?>
-  </div>
+    <h2>CSV Form Importer</h2>
+    <form action="<?= \Contao\System::getContainer()->get('request_stack')->getCurrentRequest()->getUri(); ?>" method="post" enctype="multipart/form-data">
+        <div class="tl_formbody_edit" style="margin-block: 30px; border-bottom: 0;">
+            <input type="hidden" name="FORM_SUBMIT" value="tl_csv_form_import">
+            <input type="hidden" name="REQUEST_TOKEN" value="<?= $this->tokenValue ?>">
+            <div class="widget">
+                <h3><label for="ctrl_csv_file">CSV File</label></h3>
+                <input type="file" name="csv_file" id="ctrl_csv_file" accept=".csv" class="tl_upload_field">
+            </div>
+        </div>
+        <div class="tl_formbody_submit" style="
+    border-top: 0;
+    margin-bottom: 60px;
+    margin-inline: 15px;
+">
+            <button type="submit" class="tl_submit">Upload CSV</button>
+        </div>
+    </form>
+
+    <div class="tl_info" style="margin-top:1rem; padding:1rem; background:#eef;">
+        <p><strong>About this importer:</strong></p>
+        <p>This tool allows you to import multiple forms and multiple-choice questions from a CSV file.
+           Existing forms are not modified — all imported items are new and can be edited later in the Contao backend.</p>
+        <p><a href="/files/test_csv_importer/example_forms.csv" target="_blank">Download example forms CSV</a></p>
+    </div>
 </div>

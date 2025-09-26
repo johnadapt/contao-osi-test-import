@@ -1,5 +1,0 @@
-form_alias,form_title,submit_label,field_type,field_name,label,mandatory,multiple,size,css_class,options
-contact,Contact Us,Send Message,checkbox,terms,Accept Terms,1,0,,,"1:I agree"
-contact,Contact Us,Send Message,select,topic,Topic,1,0,,,"sales:Sales|support:Support|billing:Billing"
-contact,Contact Us,Send Message,radio,priority,Priority,1,0,,,"low:Low|normal:Normal|high:High"
-feedback,Feedback,Send,submit,submit_btn,Send Feedback,0,0,,btn-primary,

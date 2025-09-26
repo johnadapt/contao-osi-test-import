@@ -1,0 +1,81 @@
+<div class="tl_listing_container">
+    <h2>Test Import Preview</h2>
+    <p style="color:#666;">
+        Note: All rows are shown. Rows with errors will be skipped during import.
+    </p>
+
+    <?php foreach ($this->forms as $formTitle => $form): ?>
+        <div class="form-preview" style="margin-bottom:2rem; padding:1rem; background:#f9f9f9; border:1px solid #ccc;">
+            <h3><?= $form['title'] ?: '<span style="color:red">Missing form_title</span>'; ?></h3>
+            <p><strong>Embed code:</strong><br><?= $form['embed_code'] ?: '<em>None</em>'; ?></p>
+            <p><strong>Percentage:</strong> <?= $form['percentage'] ?: '<em>Default 90</em>'; ?></p>
+
+            <table class="tl_listing" style="width:100%;">
+                <thead>
+                    <tr>
+                        <th style="width:36%;">Question</th>
+                        <th style="width:36%;">Options</th>
+                        <th style="width:14%;">Correct Option</th>
+                        <th style="width:14%;">Issues</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($form['questions'] as $i => $q): ?>
+                    <?php $rowClass = $i % 2 === 0 ? 'row-even' : 'row-odd'; ?>
+                    <tr class="<?= $rowClass ?>" style="border-bottom:1px solid #ddd;">
+                        <td>
+                            <?php
+                                // show question (fallback to label if present)
+                                $qText = $q['question'] ?? '';
+                                if ($qText === '' && !empty($q['label'])) {
+                                    $qText = $q['label'];
+                                }
+                                echo $qText !== '' ? htmlspecialchars($qText) : '<span style="color:red">Missing question</span>';
+                            ?>
+                        </td>
+                        <td>
+                            <?php
+                            $options = [];
+                            for ($x=1;$x<=10;$x++) {
+                                $okey = 'option_'.$x;
+                                if (!empty($q[$okey])) $options[$x] = htmlspecialchars($q[$okey]);
+                            }
+                            echo $options ? implode(', ', $options) : '<span style="color:red">No options</span>';
+                            ?>
+                        </td>
+                        <td>
+                            <?php
+                            $correct = $q['correct_option'] ?? '';
+                            if ($correct && isset($options[(int)$correct])) {
+                                echo '<strong>' . (int)$correct . ' → ' . $options[(int)$correct] . '</strong>';
+                            } elseif ($correct !== '') {
+                                echo '<span style="color:red">Invalid (missing option #'.htmlspecialchars($correct).')</span>';
+                            } else {
+                                echo '<em>None</em>';
+                            }
+                            ?>
+                        </td>
+                        <td>
+                            <?php
+                            if (!empty($q['_issues'])) {
+                                echo '<span style="color:red">'.htmlspecialchars(implode('; ', $q['_issues'])).'</span>';
+                            } else {
+                                echo '<span style="color:green">OK</span>';
+                            }
+                            ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endforeach; ?>
+
+    <form action="<?= \Contao\System::getContainer()->get('request_stack')->getCurrentRequest()->getUri(); ?>" method="post">
+        <input type="hidden" name="FORM_SUBMIT" value="tl_csv_form_import_confirm">
+        <input type="hidden" name="REQUEST_TOKEN" value="<?= $this->tokenValue ?>">
+        <div class="tl_formbody_submit">
+            <button type="submit" class="tl_submit">Confirm Import</button>
+        </div>
+    </form>
+</div>
