@@ -15,7 +15,7 @@
                     <tr>
                         <th style="width:36%;">Question</th>
                         <th style="width:36%;">Options</th>
-                        <th style="width:14%;">Correct Option</th>
+                        <th style="width:14%;">Correct Options</th>
                         <th style="width:14%;">Issues</th>
                     </tr>
                 </thead>
@@ -43,18 +43,31 @@
                             echo $options ? implode(', ', $options) : '<span style="color:red">No options</span>';
                             ?>
                         </td>
+
+                        <!-- MULTI-CORRECT PREVIEW FIXED -->
                         <td>
                             <?php
-                            $correct = $q['correct_option'] ?? '';
-                            if ($correct && isset($options[(int)$correct])) {
-                                echo '<strong>' . (int)$correct . ' → ' . $options[(int)$correct] . '</strong>';
-                            } elseif ($correct !== '') {
-                                echo '<span style="color:red">Invalid (missing option #'.htmlspecialchars($correct).')</span>';
-                            } else {
+                            $correctRaw = trim((string)($q['correct_option'] ?? ''));
+                            if ($correctRaw === '') {
                                 echo '<em>None</em>';
+                            } else {
+                                // parse "2" or "2,4" or "2, 4, 5"
+                                $correctList = array_map('trim', explode(',', $correctRaw));
+
+                                $display = [];
+                                foreach ($correctList as $c) {
+                                    if (ctype_digit($c) && isset($options[(int)$c])) {
+                                        $display[] = '<strong>' . $c . ' → ' . $options[(int)$c] . '</strong>';
+                                    } else {
+                                        $display[] = '<span style="color:red">Invalid (#' . htmlspecialchars($c) . ')</span>';
+                                    }
+                                }
+
+                                echo implode('<br>', $display);
                             }
                             ?>
                         </td>
+
                         <td>
                             <?php
                             if (!empty($q['_issues'])) {

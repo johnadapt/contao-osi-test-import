@@ -45,7 +45,7 @@ class CsvFormImport extends BackendModule
         // Create example_forms.csv if it does not exist
         if (!file_exists($absoluteExample)) {
             $exampleContent = "form_title,embed_code,percentage,question,option_1,option_2,option_3,option_4,option_5,option_6,option_7,option_8,option_9,option_10,correct_option\n"
-                . "AAA-Safety Quiz,\"<div>Example embed code or iframe</div>\",90,When handling chemicals,Use gloves,Wear goggles,Ignore safety,Wash hands,,,,,,,2\n";
+                . "AAA-Safety Quiz,\"<div>Example embed code or iframe</div>\",90,When handling chemicals,Use gloves,Wear goggles,Ignore safety,Wash hands,,,,,,,\"2,3\"\n";
             file_put_contents($absoluteExample, $exampleContent);
             FilesModel::syncFiles();
         }
@@ -72,10 +72,28 @@ class CsvFormImport extends BackendModule
 
         // === Preview page ===
         if ($step === 'preview' && $session->has('bcs_csv_form_import_preview')) {
-            $this->strTemplate        = 'be_csv_form_import_preview';
-            $this->Template           = new \Contao\BackendTemplate($this->strTemplate);
+            $this->strTemplate          = 'be_csv_form_import_preview';
+            $this->Template             = new \Contao\BackendTemplate($this->strTemplate);
             $this->Template->tokenValue = $tokenValue;
-            $this->Template->forms      = $session->get('bcs_csv_form_import_preview');
+            // $this->Template->forms      = $session->get('bcs_csv_form_import_preview');
+            
+$forms = $session->get('bcs_csv_form_import_preview');
+
+// Process each question so preview shows multiple correct answers
+foreach ($forms as &$form) {
+    foreach ($form['questions'] as &$q) {
+
+        $rawCorrect = trim((string)$q['correct_option']);
+        $correctList = array_map('trim', explode(',', $rawCorrect));
+
+        // Attach parsed correct list to preview
+        $q['_correctList'] = $correctList;
+    }
+}
+unset($form, $q);
+
+$this->Template->forms = $forms;
+            
 
             if (Input::post('FORM_SUBMIT') === 'tl_csv_form_import_confirm') {
                 $results = $this->doImport($this->Template->forms);
@@ -154,27 +172,48 @@ class CsvFormImport extends BackendModule
                 // Validate required fields per-row
                 foreach ($requiredHeaders as $req) {
                     if ($req === 'correct_option') {
-                        if ($rowData['correct_option'] === '' || !ctype_digit((string)$rowData['correct_option'])) {
-                            $issues[] = 'Missing or invalid required field: correct_option (must be a number)';
-                        } else {
-                            $c = (int) $rowData['correct_option'];
+                        $raw = trim((string) $rowData['correct_option']);
+
+                        if ($raw === '') {
+                            $issues[] = 'Missing required field: correct_option';
+                            continue;
+                        }
+
+                        // Support: "2" OR "2,4" OR "2, 4, 5"
+                        $parts = array_map('trim', explode(',', $raw));
+                        foreach ($parts as $part) {
+                            if ($part === '' || !ctype_digit($part)) {
+                                $issues[] = 'Invalid correct_option entry: "' . $part . '" (must be a number between 1 and 10)';
+                                continue 2; // break out of requiredHeaders loop for this row
+                            }
+                            $c = (int) $part;
                             if ($c < 1 || $c > 10) {
-                                $issues[] = 'Invalid correct_option: must be between 1 and 10';
+                                $issues[] = 'Invalid correct_option: ' . $part . ' (must be between 1 and 10)';
+                                continue 2;
                             }
                         }
                         continue;
                     }
+
                     if ($rowData[$req] === '') {
                         $issues[] = 'Missing required field: ' . $req;
                     }
                 }
 
-                // Extra validation: if correct_option points to empty option
-                if ($rowData['correct_option'] !== '' && ctype_digit((string)$rowData['correct_option'])) {
-                    $c = (int) $rowData['correct_option'];
-                    $optKey = 'option_' . $c;
-                    if (empty($rowData[$optKey])) {
-                        $issues[] = 'Correct option points to empty ' . $optKey;
+                // Extra validation: each correct option must point to a non-empty option
+                $rawCorrect = trim((string) $rowData['correct_option']);
+                if ($rawCorrect !== '') {
+                    $parts = array_map('trim', explode(',', $rawCorrect));
+                    foreach ($parts as $part) {
+                        if (!ctype_digit($part)) {
+                            // already handled above as an issue; skip here
+                            continue;
+                        }
+                        $c = (int) $part;
+                        $optKey = 'option_' . $c;
+                        if (empty($rowData[$optKey])) {
+                            $issues[] = 'Correct option "' . $part . '" points to empty ' . $optKey;
+                        }
                     }
                 }
 
@@ -221,12 +260,13 @@ class CsvFormImport extends BackendModule
 
             try {
                 $db->prepare("INSERT INTO tl_form
-                    (tstamp, title, alias, method, attributes, formID)
-                    VALUES (?, ?, ?, ?, ?, ?)")
+                    (tstamp, title, alias, jumpTo, method, attributes, formID)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)")
                    ->execute(
                        time(),
                        $form['title'],
                        $slug,
+                       '51',
                        'POST',
                        serialize([]),
                        $tempFormId
@@ -253,11 +293,15 @@ class CsvFormImport extends BackendModule
                 continue;
             }
 
+            // regenerate slug with ID appended
+            $newSlug = $slug . '-' . $formId;
+
             try {
                 $db->prepare("UPDATE tl_form
-                    SET formID=?, formType=?, scoringType=?, embed_code=?, percentage=?, publish=?
+                    SET alias=?, formID=?, formType=?, scoringType=?, embed_code=?, percentage=?, publish=?
                     WHERE id=?")
                    ->execute(
+                        $newSlug,
                        'cert_test_' . $formId,
                        'test',
                        'percentage_correct',
@@ -297,19 +341,32 @@ class CsvFormImport extends BackendModule
                     continue;
                 }
 
+                // Parse correct_option as comma-separated list: "2" or "2,4,5"
+                $correctRaw  = trim((string)($question['correct_option'] ?? ''));
+                $correctList = [];
+                if ($correctRaw !== '') {
+                    $correctList = array_map('trim', explode(',', $correctRaw));
+                }
+
                 // Build options array (value/label + correct mark)
                 $options = [];
                 for ($i = 1; $i <= 10; $i++) {
                     $key = 'option_' . $i;
-                    $opt = $question[$key] ?? '';
+                    $opt = trim($question[$key] ?? '');
                     if ($opt !== '') {
                         $optArr = ['value' => (string) $i, 'label' => $opt];
-                        if ((string)$i === (string)($question['correct_option'] ?? '')) {
+                        if (in_array((string)$i, $correctList, true)) {
                             $optArr['correct'] = '1';
                         }
                         $options[] = $optArr;
                     }
                 }
+
+                // Decide field type based on number of correct answers
+                $correctCount = count($correctList);
+                $fieldType = ($correctCount > 1)
+                    ? 'multiple_choice_question_multiple_answers'
+                    : 'multiple_choice_question';
 
                 try {
                     $db->prepare("INSERT INTO tl_form_field
@@ -319,10 +376,10 @@ class CsvFormImport extends BackendModule
                            time(),
                            $formId,
                            $sorting,
-                           'multiple_choice_question',
+                           $fieldType,
                            1,
                            $question['label'],   // mapped from "question"
-                           '',
+                           'question_'.$formId."_".$sorting,
                            serialize($options)
                        );
 
