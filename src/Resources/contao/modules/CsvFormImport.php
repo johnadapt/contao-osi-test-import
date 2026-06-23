@@ -118,14 +118,28 @@ $this->Template->forms = $forms;
                 return;
             }
 
-            $csv  = new File($file['tmp_name']);
-            $rows = [];
-            if (($handle = fopen($csv->path, 'r')) !== false) {
-                while (($data = fgetcsv($handle, 10000, $delimiter)) !== false) {
-                    $rows[] = $data;
+            $csvPath = $file['tmp_name'];
+            $rawContent = file_get_contents($csvPath);
+
+            // Detect and convert encoding if it is not valid UTF-8
+            if (mb_check_encoding($rawContent, 'UTF-8')) {
+                // Strip UTF-8 BOM if present
+                if (strpos($rawContent, "\xEF\xBB\xBF") === 0) {
+                    $rawContent = substr($rawContent, 3);
                 }
-                fclose($handle);
+            } else {
+                $rawContent = mb_convert_encoding($rawContent, 'UTF-8', 'Windows-1252');
             }
+
+            $stream = fopen('php://temp', 'r+');
+            fwrite($stream, $rawContent);
+            rewind($stream);
+
+            $rows = [];
+            while (($data = fgetcsv($stream, 10000, $delimiter, '"', '\\')) !== false) {
+                $rows[] = $data;
+            }
+            fclose($stream);
 
             if (count($rows) < 2) {
                 Message::addError('CSV has no data rows.');
